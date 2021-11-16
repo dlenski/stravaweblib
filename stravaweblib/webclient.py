@@ -2,10 +2,13 @@ from base64 import b64decode
 import cgi
 from collections import namedtuple
 from datetime import date, datetime
+from itertools import zip_longest
 import enum
 import functools
 import json
 import time
+from textwrap import dedent
+from xml.sax.saxutils import escape, quoteattr
 
 from bs4 import BeautifulSoup
 import requests
@@ -19,6 +22,28 @@ BASE_URL = "https://www.strava.com"
 
 
 ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
+
+
+def _iso8601(ts):
+    return datetime.utcfromtimestamp(ts).isoformat() + 'Z'
+
+
+# https://developers.strava.com/docs/uploads/
+_tcx_sport_from_strava = {
+    'Run': 'Running',
+    'Ride': 'Biking',
+    'Swim': 'Swimming',
+    'Hike': 'Hiking',
+    'Walk': 'Walking',
+}
+# https://stackoverflow.com/questions/61903437/what-do-the-strava-gpx-type-type-elements-mean
+_gpx_type_from_strava = {
+    'Run': '9',
+    'Bike': '1',
+    'Swim': '16',
+    'Hike': '4',
+    'Walk': '10',
+}
 
 
 class DataFormat(enum.Enum):
@@ -174,6 +199,151 @@ class WebClient(stravalib.Client):
             raise stravalib.exc.Fault(
                 "Failed to delete activity (status code: {})".format(resp.status_code),
             )
+
+    def scrape_activity_data(self, activity_id, fmt=DataFormat.TCX, known_start_time=None):
+        """
+        Get a file containing the provided activity's data
+
+        The returned data is scraped from the Strava web interface
+        and the JSON streams endpoint it uses, then converted into either
+        GPX or TCX format.
+
+        This allows extracting activity data for users other than the
+        logged-in user. Important limitations: the activity's start
+        time cannot be determined to better than one-minute accuracy,
+        and it may be in the wrong timezone.
+
+        :param activity_id: The activity to retrieve.
+        :type activity_id: int
+
+        :param fmt: The format to request the data in
+                    (defaults to DataFormat.TCX).
+        :type fmt: :class:`DataFormat`
+
+        :param known_start_time: The Unix-epoch timestamp of the
+                                 activity's start time, if known.
+        :type known_start:time: int or :class:`datetime.datetime`
+        """
+        fmt = DataFormat.classify(fmt)
+
+        # Open the HTML page for this activity. Then scrape title,
+        # device, type, and approximate start time from it on a "best
+        # effort" basis; don't fail if any/all of them can't be found.
+        url = main_url = "{}/activities/{}".format(BASE_URL, activity_id)
+        resp = self._session.get(url, allow_redirects=False)
+        if resp.status_code != 200:
+            raise stravalib.exc.Fault("Status code '{}' received when trying to "
+                                      "scrape HTML for activity {}"
+                                      "".format(resp.status_code, activity_id))
+
+        soup = BeautifulSoup(resp.text, 'html5lib')
+        tag = soup.find(class_="activity-name")
+        activity_title = tag.text.strip() if tag else ""
+
+        tag = soup.find(class_="device")
+        device = tag.text.strip() if tag else ""
+
+        # Page title looks like "Activity Name | Activity Type | Strava"
+        tag = soup.find("title")
+        activity_type = tag.text.split('|')[-2].strip() if tag and tag.text.count('|') >= 2 else "Other"
+
+        if known_start_time is not None:
+            start_time = known_start_time
+        else:
+            start_time = 0
+            for tag in soup.find_all('time'):
+                try:
+                    # This timestamp is accurate only to one minute,
+                    # and it's in the timezone of the activity's
+                    # starting location. We could correct it by using
+                    # 'timezonefinder' and 'pytz' to infer the correct
+                    # timezone from the GPS location, or the user's
+                    # default location in the absence of GPS data.
+                    start_time = datetime.strptime(
+                        tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
+                    break
+                except ValueError:
+                    pass
+
+        # Request streams JSON, used by Strava web UI to show map and
+        # summary stats. We have to read the entire JSON and transpose
+        # it in order to output it in any known format.
+        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        streams = ('altitude', 'distance', 'time', 'latlng', 'heartrate', 'cadence')
+        url = "{}/activities/{}/streams?_={}&{}".format(BASE_URL, activity_id, now_ms, '&'.join('&stream_types[]={}'.format(s) for s in streams))
+        resp = self._session.get(url, allow_redirects=False, headers={'Referer': main_url})
+        if resp.status_code != 200:
+            raise stravalib.exc.Fault("Status code '{}' received when trying to "
+                                      "download streams JSON for activity {}"
+                                      "".format(resp.status_code, activity_id))
+        sj = resp.json()
+        points = zip_longest(*(sj.get(k, []) for k in streams))
+
+        if fmt == DataFormat.TCX:
+            activity_type = _tcx_sport_from_strava.get(activity_type, activity_type)
+            xml = dedent("""\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                  <Activities>
+                    <Activity Sport={0}>
+                      <Notes>{1}</Notes>
+                      <Id>{2}</Id>
+                      <Lap StartTime="{2}">
+                        <Track>
+                """).format(quoteattr(activity_type), escape(activity_title), _iso8601(start_time))
+
+            for altitude, distance, time, latlng, heartrate, cadence in points:
+                xml += '          <Trackpoint><Time>{}</Time>'.format(_iso8601(start_time + time))
+                if latlng is not None:
+                    xml += '<Position><LatitudeDegrees>{}</LatitudeDegrees><LongitudeDegrees>{}</LongitudeDegrees></Position>'.format(*latlng)
+                if altitude is not None:
+                    xml += '<AltitudeMeters>{}</AltitudeMeters>'.format(altitude)
+                if distance is not None:
+                    xml += '<DistanceMeters>{}</DistanceMeters>'.format(distance)
+                if heartrate is not None:
+                    xml += '<HeartRateBpm><Value>{}</Value></HeartRateBpm>'.format(heartrate)
+                if cadence is not None:
+                    xml += '<Cadence>{}</Cadence>'.format(cadence)
+                xml += '</Trackpoint>\n'
+
+            xml += '        </Track>\n      </Lap>\n'
+            if device:
+                xml += '      <Creator xsi:type="Device_t"><Name>{}</Name></Creator>\n'.format(device)
+            xml += '    </Activity>\n  </Activities>\n</TrainingCenterDatabase>\n'
+        elif fmt == DataFormat.GPX:
+            activity_type = escape(_gpx_type_from_strava.get(activity_type, activity_type))
+            xml = dedent("""\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <gpx xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" version="1.1" creator={}>
+                  <metadata>
+                    <time>{}</time>
+                  </metadata>
+                  <trk>
+                    <name>{}</name>
+                    <type>{}</type>
+                    <trkseg>\n""").format(quoteattr(device), _iso8601(start_time), escape(activity_title), escape(activity_type))
+            for altitude, distance, time, latlng, heartrate, cadence in points:
+                xml += '      <trkpt'
+                if latlng is not None:
+                    xml += ' lat="{}" lon="{}"'.format(*latlng)
+                xml += '><time>{}</time>'.format(_iso8601(start_time + time))
+                if altitude is not None:
+                    xml += '<ele>{}</ele>'.format(altitude)
+                xml += '<extensions><gpxtpx:TrackPointExtension>'
+                if distance is not None:
+                    xml += '<distance>{}</distance>'.format(distance)
+                if heartrate is not None:
+                    xml += '<gpxtpx:hr>{}</gpxtpx:hr>'.format(heartrate)
+                if cadence is not None:
+                    xml += '<gpxtpx:cad>{}</gpxtpx:cad>'.format(cadence)
+                xml += '</gpxtpx:TrackPointExtension></extensions></trkpt>\n'
+
+            xml += '    </trkseg>\n  </trk>\n</gpx>\n'
+        else:
+            raise NotImplementedError("`fmt` parameter DataFormat.{} not implemented".format(fmt))
+
+        filename = '{}.{}'.format(activity_id, fmt)
+        return ActivityFile(filename=filename, content=(xml.encode(),))
 
     def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
                           json_fmt=None):
