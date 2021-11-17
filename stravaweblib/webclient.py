@@ -287,6 +287,15 @@ class WebClient(stravalib.Client):
             except ValueError:
                 pass
 
+        # Request export_gpx (HEAD only) to get filename hint. The GPX export
+        # for other users' activities includes only the route (lat/long) and
+        # no timestamps or other data, so not very useful "as is."
+        url = "{}/activities/{}/export_gpx".format(BASE_URL, activity_id)
+        resp = self._session.head(url, allow_redirects=False, headers={'Referer': main_url})
+        filename = get_server_filename(resp)
+        if fmt == DataFormat.TCX and filename.endswith('.gpx'):
+            filename = filename[:-4] + '.tcx'
+
         # Request streams JSON, used by Strava web UI to show map and
         # summary stats. We have to read the entire JSON and transpose
         # it in order to output it in any known format.
@@ -404,7 +413,6 @@ class WebClient(stravalib.Client):
         else:
             raise NotImplementedError("`fmt` parameter DataFormat.{} not implemented".format(fmt))
 
-        filename = '{}.{}'.format(activity_id, fmt)
         return ActivityFile(filename=filename, content=(xml.encode(),))
 
     @staticmethod
@@ -474,7 +482,10 @@ class WebClient(stravalib.Client):
                 raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
 
-        return self._make_export_file(resp, activity_id, fmt)
+        # Return the filename and an iterator to download the file with
+        filename = get_server_filename(resp)
+        return ActivityFile(filename=filename,
+                            content=resp.iter_content(chunk_size=16384))
 
     def _parse_date(self, date_str):
         if not date_str:
