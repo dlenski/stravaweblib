@@ -257,6 +257,15 @@ class WebClient(stravalib.Client):
             except ValueError:
                 pass
 
+        # Request export_gpx (HEAD only) to get filename hint. The GPX export
+        # for other users' activities includes only the route (lat/long) and
+        # no timestamps or other data, so not very useful "as is."
+        url = "{}/activities/{}/export_gpx".format(BASE_URL, activity_id)
+        resp = self._session.head(url, allow_redirects=False, headers={'Referer': main_url})
+        filename = self._strava_filename(resp, activity_id, fmt)
+        if fmt == DataFormat.TCX and filename.endswith('.gpx'):
+            filename = filename[:-4] + '.tcx'
+
         # Request streams JSON, used by Strava web UI to show map and
         # summary stats. We have to read the entire JSON and transpose
         # it in order to output it in any known format.
@@ -374,7 +383,6 @@ class WebClient(stravalib.Client):
         else:
             raise NotImplementedError("`fmt` parameter DataFormat.{} not implemented".format(fmt))
 
-        filename = '{}.{}'.format(activity_id, fmt)
         return ActivityFile(filename=filename, content=(xml.encode(),))
 
     def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
@@ -420,6 +428,12 @@ class WebClient(stravalib.Client):
                 raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
 
+        # Return the filename and an iterator to download the file with
+        filename = self._strava_filename(resp, activity_id, fmt)
+        return ActivityFile(filename=filename,
+                            content=resp.iter_content(chunk_size=16384))
+    @staticmethod
+    def _strava_filename(resp, activity_id, fmt):
         # Get file name from request (if possible)
         content_disposition = resp.headers.get('content-disposition', "")
         filename = cgi.parse_header(content_disposition)[1].get('filename')
@@ -437,9 +451,7 @@ class WebClient(stravalib.Client):
                 ext = fmt
             filename = "{}.{}".format(filename, ext)
 
-        # Return the filename and an iterator to download the file with
-        return ActivityFile(filename=filename,
-                            content=resp.iter_content(chunk_size=16384))
+        return filename
 
     def _parse_date(self, date_str):
         if not date_str:
