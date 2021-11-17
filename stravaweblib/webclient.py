@@ -204,8 +204,8 @@ class WebClient(stravalib.Client):
         """
         Get a file containing the provided activity's data
 
-        The returned data is scraped from the Strava web interface
-        and the JSON streams endpoint it uses, then converted into either
+        The returned data is scraped from the Strava web interface and
+        various JSON streams that it uses, then converted into either
         GPX or TCX format.
 
         This allows extracting activity data for users other than the
@@ -279,20 +279,30 @@ class WebClient(stravalib.Client):
         sj = resp.json()
         points = zip_longest(*(sj.get(k, []) for k in streams))
 
+        # Request lap efforts JSON, used by Strava web UI to show laps.
+        # Laps will be ignored if this fails (best-effort).
+        url = "{}/activities/{}/lap_efforts".format(BASE_URL, activity_id)
+        resp = self._session.get(url, allow_redirects=False, headers={'Referer': main_url})
+        laps_end_after = None
+        if resp.status_code == 200:
+            laps_end_after = [lap['end_index'] for lap in resp.json()]
+
         if fmt == DataFormat.TCX:
             activity_type = _tcx_sport_from_strava.get(activity_type, activity_type)
             xml = dedent("""\
                 <?xml version="1.0" encoding="UTF-8"?>
                 <TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
                   <Activities>
-                    <Activity Sport={0}>
-                      <Notes>{1}</Notes>
-                      <Id>{2}</Id>
-                      <Lap StartTime="{2}">
-                        <Track>
+                    <Activity Sport={}>
+                      <Notes>{}</Notes>
+                      <Id>{}</Id>
                 """).format(quoteattr(activity_type), escape(activity_title), _iso8601(start_time))
 
-            for altitude, distance, time, latlng, heartrate, cadence in points:
+            in_lap = False
+            for ii, (altitude, distance, time, latlng, heartrate, cadence) in enumerate(points):
+                if not in_lap:
+                    xml += '      <Lap StartTime="{}">\n        <Track>\n'.format(_iso8601(start_time + time))
+                    in_lap = True
                 xml += '          <Trackpoint><Time>{}</Time>'.format(_iso8601(start_time + time))
                 if latlng is not None:
                     xml += '<Position><LatitudeDegrees>{}</LatitudeDegrees><LongitudeDegrees>{}</LongitudeDegrees></Position>'.format(*latlng)
@@ -305,8 +315,13 @@ class WebClient(stravalib.Client):
                 if cadence is not None:
                     xml += '<Cadence>{}</Cadence>'.format(cadence)
                 xml += '</Trackpoint>\n'
+                if laps_end_after and ii == laps_end_after[0]:
+                    xml += '        </Track>\n      </Lap>\n'
+                    laps_end_after.pop(0)
+                    in_lap = False
 
-            xml += '        </Track>\n      </Lap>\n'
+            if in_lap:
+                xml += '        </Track>\n      </Lap>\n'
             if device:
                 xml += '      <Creator xsi:type="Device_t"><Name>{}</Name></Creator>\n'.format(device)
             xml += '    </Activity>\n  </Activities>\n</TrainingCenterDatabase>\n'
@@ -321,8 +336,13 @@ class WebClient(stravalib.Client):
                   <trk>
                     <name>{}</name>
                     <type>{}</type>
-                    <trkseg>\n""").format(quoteattr(device), _iso8601(start_time), escape(activity_title), escape(activity_type))
-            for altitude, distance, time, latlng, heartrate, cadence in points:
+                """).format(quoteattr(device), _iso8601(start_time), escape(activity_title), escape(activity_type))
+
+            in_lap = False
+            for ii, (altitude, distance, time, latlng, heartrate, cadence) in enumerate(points):
+                if not in_lap:
+                    xml += '    <trkseg>\n'
+                    in_lap = True
                 xml += '      <trkpt'
                 if latlng is not None:
                     xml += ' lat="{}" lon="{}"'.format(*latlng)
@@ -337,8 +357,14 @@ class WebClient(stravalib.Client):
                 if cadence is not None:
                     xml += '<gpxtpx:cad>{}</gpxtpx:cad>'.format(cadence)
                 xml += '</gpxtpx:TrackPointExtension></extensions></trkpt>\n'
+                if laps_end_after and ii == laps_end_after[0]:
+                    xml += '    </trkseg\n'
+                    laps_end_after.pop(0)
+                    in_lap = False
 
-            xml += '    </trkseg>\n  </trk>\n</gpx>\n'
+            if in_lap:
+                xml += '    </trkseg>\n'
+            xml += '  </trk>\n</gpx>\n'
         else:
             raise NotImplementedError("`fmt` parameter DataFormat.{} not implemented".format(fmt))
 
