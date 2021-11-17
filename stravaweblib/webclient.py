@@ -19,6 +19,7 @@ __all__ = ["WebClient", "FrameType", "DataFormat", "ActivityFile"]
 
 
 BASE_URL = "https://www.strava.com"
+NENE_URL = "https://nene.strava.com"
 
 
 ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
@@ -200,7 +201,7 @@ class WebClient(stravalib.Client):
                 "Failed to delete activity (status code: {})".format(resp.status_code),
             )
 
-    def scrape_activity_data(self, activity_id, fmt=DataFormat.TCX, known_start_time=None):
+    def scrape_activity_data(self, activity_id, fmt=DataFormat.TCX):
         """
         Get a file containing the provided activity's data
 
@@ -209,9 +210,7 @@ class WebClient(stravalib.Client):
         GPX or TCX format.
 
         This allows extracting activity data for users other than the
-        logged-in user. Important limitations: the activity's start
-        time cannot be determined to better than one-minute accuracy,
-        and it may be in the wrong timezone.
+        logged-in user.
 
         :param activity_id: The activity to retrieve.
         :type activity_id: int
@@ -219,10 +218,6 @@ class WebClient(stravalib.Client):
         :param fmt: The format to request the data in
                     (defaults to DataFormat.TCX).
         :type fmt: :class:`DataFormat`
-
-        :param known_start_time: The Unix-epoch timestamp of the
-                                 activity's start time, if known.
-        :type known_start:time: int or :class:`datetime.datetime`
         """
         fmt = DataFormat.classify(fmt)
 
@@ -247,23 +242,20 @@ class WebClient(stravalib.Client):
         tag = soup.find("title")
         activity_type = tag.text.split('|')[-2].strip() if tag and tag.text.count('|') >= 2 else "Other"
 
-        if known_start_time is not None:
-            start_time = known_start_time
-        else:
-            start_time = 0
-            for tag in soup.find_all('time'):
-                try:
-                    # This timestamp is accurate only to one minute,
-                    # and it's in the timezone of the activity's
-                    # starting location. We could correct it by using
-                    # 'timezonefinder' and 'pytz' to infer the correct
-                    # timezone from the GPS location, or the user's
-                    # default location in the absence of GPS data.
-                    start_time = datetime.strptime(
-                        tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
-                    break
-                except ValueError:
-                    pass
+        start_time = 0
+        for tag in soup.find_all('time'):
+            try:
+                # This timestamp is accurate only to one minute,
+                # and it's in the timezone of the activity's
+                # starting location. We could correct it by using
+                # 'timezonefinder' and 'pytz' to infer the correct
+                # timezone from the GPS location, or the user's
+                # default location in the absence of GPS data.
+                start_time = datetime.strptime(
+                    tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
+                break
+            except ValueError:
+                pass
 
         # Request streams JSON, used by Strava web UI to show map and
         # summary stats. We have to read the entire JSON and transpose
@@ -286,6 +278,20 @@ class WebClient(stravalib.Client):
         laps_end_after = None
         if resp.status_code == 200:
             laps_end_after = [lap['end_index'] for lap in resp.json()]
+
+        # Finally, request JSON used in Flyby feature to get exact/accurate start time.
+        # Approximate start time from HTML will be used if it fails (best-effort).
+        # The JSON always looks like this and we just need the first timestamp:
+        #   {"stream":[{"point":{"lat":number,"lng":number},"time":integer,"elevation":number}, ...]}
+        url = "{0}/flyby/stream_compare/{1}/{1}".format(NENE_URL, activity_id)
+        resp = self._session.get(url, stream=True, headers={'Range': 'bytes=0-1024', 'Referer': 'https://labs.strava.com'})
+        if resp.status_code == 200:
+            fragment = next(resp.iter_content(chunk_size=1024))
+            start = fragment.find(b'"time":')
+            comma = fragment.find(b',', start)
+            if start > 0 and comma > 0:
+                start_time = int(fragment[start + 7: comma])
+            resp.close()
 
         if fmt == DataFormat.TCX:
             activity_type = _tcx_sport_from_strava.get(activity_type, activity_type)
