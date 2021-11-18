@@ -309,9 +309,12 @@ class WebClient(stravalib.Client):
                 <TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
                   <Activities>
                     <Activity Sport={}>
-                      <Notes>{}</Notes>
                       <Id>{}</Id>
-                """).format(quoteattr(activity_type), escape(activity_title), _iso8601(start_time))
+                """).format(quoteattr(activity_type), _iso8601(start_time))
+            if activity_title:
+                xml += '      <Notes>{}</Notes>\n'.format(escape(activity_title))
+            if device:
+                xml += '      <Creator xsi:type="Device_t"><Name>{}</Name></Creator>\n'.format(device)
 
             in_lap = False
             for ii, (altitude, distance, time, latlng, heartrate, cadence) in enumerate(points):
@@ -337,8 +340,6 @@ class WebClient(stravalib.Client):
 
             if in_lap:
                 xml += '        </Track>\n      </Lap>\n'
-            if device:
-                xml += '      <Creator xsi:type="Device_t"><Name>{}</Name></Creator>\n'.format(device)
             xml += '    </Activity>\n  </Activities>\n</TrainingCenterDatabase>\n'
         elif fmt == DataFormat.GPX:
             activity_type = escape(_gpx_type_from_strava.get(activity_type, activity_type))
@@ -349,9 +350,10 @@ class WebClient(stravalib.Client):
                     <time>{}</time>
                   </metadata>
                   <trk>
-                    <name>{}</name>
                     <type>{}</type>
-                """).format(quoteattr(device), _iso8601(start_time), escape(activity_title), escape(activity_type))
+                """).format(quoteattr(device), _iso8601(start_time), escape(activity_type))
+            if activity_title:
+                xml += '    <name>{}</name>\n'.format(escape(activity_title))
 
             in_lap = False
             for ii, (altitude, distance, time, latlng, heartrate, cadence) in enumerate(points):
