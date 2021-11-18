@@ -220,12 +220,14 @@ class WebClient(stravalib.Client):
         :type fmt: :class:`DataFormat`
         """
         fmt = DataFormat.classify(fmt)
+        explain = '<!-- Munged from this sequence of requests:\n'
 
         # Open the HTML page for this activity. Then scrape title,
         # device, type, and approximate start time from it on a "best
         # effort" basis; don't fail if any/all of them can't be found.
         url = main_url = "{}/activities/{}".format(BASE_URL, activity_id)
         resp = self._session.get(url, allow_redirects=False)
+        explain += '  ({}) {} {}\n'.format(resp.status_code, resp.request.method, resp.url)
         if resp.status_code != 200:
             raise stravalib.exc.Fault("Status code '{}' received when trying to "
                                       "scrape HTML for activity {}"
@@ -262,6 +264,7 @@ class WebClient(stravalib.Client):
         # no timestamps or other data, so not very useful "as is."
         url = "{}/activities/{}/export_gpx".format(BASE_URL, activity_id)
         resp = self._session.head(url, allow_redirects=False, headers={'Referer': main_url})
+        explain += '  ({}) {} {}\n'.format(resp.status_code, resp.request.method, resp.url)
         filename = self._strava_filename(resp, activity_id, fmt)
         if fmt == DataFormat.TCX and filename.endswith('.gpx'):
             filename = filename[:-4] + '.tcx'
@@ -273,6 +276,7 @@ class WebClient(stravalib.Client):
         streams = ('altitude', 'distance', 'time', 'latlng', 'heartrate', 'cadence')
         url = "{}/activities/{}/streams?_={}&{}".format(BASE_URL, activity_id, now_ms, '&'.join('&stream_types[]={}'.format(s) for s in streams))
         resp = self._session.get(url, allow_redirects=False, headers={'Referer': main_url})
+        explain += '  ({}) {} {}\n'.format(resp.status_code, resp.request.method, resp.url)
         if resp.status_code != 200:
             raise stravalib.exc.Fault("Status code '{}' received when trying to "
                                       "download streams JSON for activity {}"
@@ -284,6 +288,7 @@ class WebClient(stravalib.Client):
         # Laps will be ignored if this fails (best-effort).
         url = "{}/activities/{}/lap_efforts".format(BASE_URL, activity_id)
         resp = self._session.get(url, allow_redirects=False, headers={'Referer': main_url})
+        explain += '  ({}) {} {}\n'.format(resp.status_code, resp.request.method, resp.url)
         laps_end_after = None
         if resp.status_code == 200:
             laps_end_after = [lap['end_index'] for lap in resp.json()]
@@ -294,6 +299,7 @@ class WebClient(stravalib.Client):
         #   {"stream":[{"point":{"lat":number,"lng":number},"time":integer,"elevation":number}, ...]}
         url = "{0}/flyby/stream_compare/{1}/{1}".format(NENE_URL, activity_id)
         resp = self._session.get(url, stream=True, headers={'Range': 'bytes=0-1024', 'Referer': 'https://labs.strava.com'})
+        explain += '  ({}) {} {}\n-->\n'.format(resp.status_code, resp.request.method, resp.url)
         if resp.status_code == 200:
             fragment = next(resp.iter_content(chunk_size=1024))
             start = fragment.find(b'"time":')
@@ -302,10 +308,10 @@ class WebClient(stravalib.Client):
                 start_time = int(fragment[start + 7: comma])
             resp.close()
 
+        xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + explain
         if fmt == DataFormat.TCX:
             activity_type = _tcx_sport_from_strava.get(activity_type, activity_type)
-            xml = dedent("""\
-                <?xml version="1.0" encoding="UTF-8"?>
+            xml += dedent("""\
                 <TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
                   <Activities>
                     <Activity Sport={}>
@@ -343,8 +349,7 @@ class WebClient(stravalib.Client):
             xml += '    </Activity>\n  </Activities>\n</TrainingCenterDatabase>\n'
         elif fmt == DataFormat.GPX:
             activity_type = escape(_gpx_type_from_strava.get(activity_type, activity_type))
-            xml = dedent("""\
-                <?xml version="1.0" encoding="UTF-8"?>
+            xml += dedent("""\
                 <gpx xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" version="1.1" creator={}>
                   <metadata>
                     <time>{}</time>
