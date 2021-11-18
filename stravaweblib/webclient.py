@@ -233,9 +233,31 @@ class WebClient(stravalib.Client):
                                       "scrape HTML for activity {}"
                                       "".format(resp.status_code, activity_id))
 
+        activity_title = activity_desc = ""
+        start_time = 0
+
         soup = BeautifulSoup(resp.text, 'html5lib')
-        tag = soup.find(class_="activity-name")
-        activity_title = tag.text.strip() if tag else ""
+        details = soup.find('div', class_='details')
+        if details:
+            tag = details.find(class_="activity-name")
+            if tag:
+                activity_title = tag.text.strip()
+            tag = details.find(class_="content")
+            if tag:
+                activity_desc = tag.text.strip()
+            tag = details.find('time')
+            if tag:
+                try:
+                    # This timestamp is accurate only to one minute,
+                    # and it's in the timezone of the activity's
+                    # starting location. We could correct it by using
+                    # 'timezonefinder' and 'pytz' to infer the correct
+                    # timezone from the GPS location, or the user's
+                    # default location in the absence of GPS data.
+                    start_time = datetime.strptime(
+                        tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
+                except ValueError:
+                    pass
 
         tag = soup.find(class_="device")
         device = tag.text.strip() if tag else ""
@@ -243,21 +265,6 @@ class WebClient(stravalib.Client):
         # Page title looks like "Activity Name | Activity Type | Strava"
         tag = soup.find("title")
         activity_type = tag.text.split('|')[-2].strip() if tag and tag.text.count('|') >= 2 else "Other"
-
-        start_time = 0
-        for tag in soup.find_all('time'):
-            try:
-                # This timestamp is accurate only to one minute,
-                # and it's in the timezone of the activity's
-                # starting location. We could correct it by using
-                # 'timezonefinder' and 'pytz' to infer the correct
-                # timezone from the GPS location, or the user's
-                # default location in the absence of GPS data.
-                start_time = datetime.strptime(
-                    tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
-                break
-            except ValueError:
-                pass
 
         # Request export_gpx (HEAD only) to get filename hint. The GPX export
         # for other users' activities includes only the route (lat/long) and
@@ -317,8 +324,8 @@ class WebClient(stravalib.Client):
                     <Activity Sport={}>
                       <Id>{}</Id>
                 """).format(quoteattr(activity_type), _iso8601(start_time))
-            if activity_title:
-                xml += '      <Notes>{}</Notes>\n'.format(escape(activity_title))
+            if activity_title or activity_desc:
+                xml += '      <Notes>{}{}</Notes>\n'.format(escape(activity_title), ('\n' if activity_desc else '') + escape(activity_desc))
             if device:
                 xml += '      <Creator xsi:type="Device_t"><Name>{}</Name></Creator>\n'.format(device)
 
@@ -359,6 +366,8 @@ class WebClient(stravalib.Client):
                 """).format(quoteattr(device), _iso8601(start_time), escape(activity_type))
             if activity_title:
                 xml += '    <name>{}</name>\n'.format(escape(activity_title))
+            if activity_desc:
+                xml += '    <desc>{}</desc>\n'.format(escape(activity_desc))
 
             in_lap = False
             for ii, (altitude, distance, time, latlng, heartrate, cadence) in enumerate(points):
