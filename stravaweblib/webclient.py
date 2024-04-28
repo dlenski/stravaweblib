@@ -222,6 +222,18 @@ class WebClient(stravalib.Client):
         fmt = DataFormat.classify(fmt)
         explain = '<!-- Munged from this sequence of requests:\n'
 
+        # Series of requests:
+        #   GET /activities/$AID -> HTML
+        #     Must succeed; best effort to scrape title, device, type, approximate start time
+        #   HEAD /activities/$AID/gpx_export -> HTTP headers
+        #     Best effort to get Strava's chosen filename
+        #   GET /activities/$AID/streams?... -> JSON
+        #     Must succeed; get activity data
+        #   GET /activities/$AID/lap_efforts -> JSON
+        #     Best effort to get laps
+        #   GET /flyby/stream_compare/$AID/$AID -> JSON
+        #     Best effort to get exact start time
+
         # Open the HTML page for this activity. Then scrape title,
         # device, type, and approximate start time from it on a "best
         # effort" basis; don't fail if any/all of them can't be found.
