@@ -1,7 +1,7 @@
 from base64 import b64decode
-import cgi
 from collections import namedtuple
 from datetime import date, datetime
+from email.message import Message
 import enum
 import functools
 import json
@@ -47,6 +47,25 @@ class FrameType(enum.Enum):
 
     def __str__(self):
         return str(self.name).replace("_", " ").title()
+
+
+def get_server_filename(resp):
+    """Get the server-suggested filename from a Content-Disposition header"""
+    # This replaces cgi.parse_header which was removed in Python 3.13.
+    # The following approach is adapted from the recommended replacement
+    # detailed in PEP 594
+    cd = resp.headers.get("content-disposition")
+    if not cd:
+        return None
+    m = Message()
+    m["content-type"] = cd
+
+    # Note that this doesn't seem to parse uncommon, but in-spec headers
+    # properly and can return a tuple - just ignore these cases
+    filename = m.get_param("filename")
+    if not filename or not isinstance(filename, str):
+        return None
+    return filename
 
 
 class WebClient(stravalib.Client):
@@ -189,8 +208,7 @@ class WebClient(stravalib.Client):
     @staticmethod
     def _make_export_file(resp, id_):
         # Get file name from request (if possible)
-        content_disposition = resp.headers.get("content-disposition", "")
-        filename = cgi.parse_header(content_disposition)[1].get("filename")
+        filename = get_server_filename(resp)
 
         # Sane default for filename
         if not filename:
