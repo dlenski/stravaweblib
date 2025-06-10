@@ -206,7 +206,7 @@ class WebClient(stravalib.Client):
             )
 
     @staticmethod
-    def _make_export_file(resp, id_):
+    def _make_export_file(resp, id_, fmt):
         # Get file name from request (if possible)
         filename = get_server_filename(resp)
 
@@ -272,7 +272,7 @@ class WebClient(stravalib.Client):
                 raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
 
-        return self._make_export_file(resp, activity_id)
+        return self._make_export_file(resp, activity_id, fmt)
 
     def _parse_date(self, date_str):
         if not date_str:
@@ -388,7 +388,7 @@ class WebClient(stravalib.Client):
                                       "to download a route"
                                       "".format(resp.status_code))
 
-        return self._make_export_file(resp, route_id)
+        return self._make_export_file(resp, route_id, fmt)
 
 
 
