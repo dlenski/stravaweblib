@@ -276,6 +276,7 @@ class WebClient(stravalib.Client):
                                       "".format(resp.status_code, activity_id))
 
         activity_title = activity_desc = ""
+        start_time_acc = 'totally unknown'
         start_time = 0
 
         soup = BeautifulSoup(resp.text, 'html5lib')
@@ -298,8 +299,14 @@ class WebClient(stravalib.Client):
                     # default location in the absence of GPS data.
                     start_time = datetime.strptime(
                         tag.text.strip(), '%I:%M %p on %A, %B %d, %Y').timestamp()
+                    start_time_acc = 'accurate to within 1 minute (but uncertain timezone)'
                 except ValueError:
-                    pass
+                    try:
+                        start_time = datetime.strptime(
+                            tag.text.strip(), '%A, %B %d, %Y').timestamp()
+                        start_time_acc = 'accurate to within 1 day'
+                    except ValueError:
+                        pass
 
         tag = soup.find(class_="device")
         device = tag.text.strip() if tag else ""
@@ -321,7 +328,7 @@ class WebClient(stravalib.Client):
         # Request streams JSON, used by Strava web UI to show map and
         # summary stats. We have to read the entire JSON and transpose
         # it in order to output it in any known format.
-        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        now_ms = int(datetime.now().timestamp() * 1000)
         streams = ('altitude', 'distance', 'time', 'latlng', 'heartrate', 'cadence')
         url = "{}/activities/{}/streams?_={}&{}".format(BASE_URL, activity_id, now_ms, '&'.join('&stream_types[]={}'.format(s) for s in streams))
         resp = self._session.get(url, allow_redirects=False, headers={'Referer': main_url})
@@ -356,6 +363,8 @@ class WebClient(stravalib.Client):
             if start > 0 and comma > 0:
                 start_time = int(fragment[start + 7: comma])
             resp.close()
+
+        explain += '\nStart time of the activity is {}\n-->\n'.format(start_time_acc)
 
         xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + explain
         if fmt == DataFormat.TCX:
